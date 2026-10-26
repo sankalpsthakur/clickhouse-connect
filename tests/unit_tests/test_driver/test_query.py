@@ -1,5 +1,6 @@
 import zoneinfo
 from datetime import timedelta, timezone
+from types import SimpleNamespace
 
 import pyarrow as pa
 import pytest
@@ -7,7 +8,7 @@ import pytest
 from clickhouse_connect.driver import query as query_module
 from clickhouse_connect.driver import tzutil
 from clickhouse_connect.driver._backend.httpcommon import is_columns_only_query
-from clickhouse_connect.driver.client import _strip_utc_timezone_from_arrow
+from clickhouse_connect.driver.client import Client, _strip_utc_timezone_from_arrow
 from clickhouse_connect.driver.exceptions import ProgrammingError
 from clickhouse_connect.driver.query import QueryContext
 
@@ -389,7 +390,10 @@ def test_clickhouse_line_and_nested_comments_are_commands(query):
         ("SELECT number FROM numbers(5) /* a /* b */ LIMIT 0 */", True, False, False),
         ("SELECT number FROM numbers(5) /* a /* LIMIT 0 */ b */ LIMIT 1", True, True, False),
         ("SELECT number AS `a--b` FROM numbers(9) LIMIT 1", True, True, False),
+        ("SELECT number AS `a# b` FROM numbers(9) LIMIT 1", True, True, False),
         ("SELECT number AS `LIMIT 0--` FROM numbers(9)", True, False, False),
+        ("SELECT '// LIMIT 0'", True, False, False),
+        ("SELECT '# LIMIT 0'", True, False, False),
         ("SELECT number, $$--$$ AS tag FROM numbers(9) LIMIT 1", True, True, False),
         ("SELECT number, $doc$-- LIMIT 0$doc$ AS tag FROM numbers(9) LIMIT 1", True, True, False),
         ("SELECT number FROM numbers(9) WHERE toString(number) != 'a\\'b-- LIMIT 0' LIMIT 1", True, True, False),
@@ -415,6 +419,8 @@ def test_query_classification_follows_server_lexer(query, is_select, has_limit, 
         ("SELECT number FROM numbers(9) // LIMIT 0", False),
         ("SELECT number AS `LIMIT 0--` FROM numbers(9)", False),
         ("SELECT 'foo\\' LIMIT 0--bar' AS value", False),
+        ("SELECT '// LIMIT 0'", False),
+        ("SELECT '# LIMIT 0'", False),
         ("SELECT number FROM numbers(9) /* a /* b */ LIMIT 0 */", False),
         ("SELECT number FROM numbers(9) WHERE toString(number) != ' LIMIT 0'", False),
         ("SELECT number FROM numbers(9) LIMIT 0", True),
@@ -426,6 +432,28 @@ def test_query_classification_follows_server_lexer(query, is_select, has_limit, 
 def test_columns_only_probe_uses_lexical_limit_zero(query, columns_only):
     context = QueryContext(query)
     assert is_columns_only_query(context) is columns_only
+
+
+@pytest.mark.parametrize(
+    "query, appends_limit",
+    [
+        ("SELECT number FROM numbers(9) // LIMIT 5", True),
+        ("SELECT number FROM numbers(9) # LIMIT 5", True),
+        ("SELECT number FROM numbers(9) /* a /* b */ LIMIT 0 */", True),
+        ("SELECT number FROM numbers(9) WHERE toString(number) != ' LIMIT 1'", True),
+        ("SELECT number AS `a--b` FROM numbers(9) LIMIT 1", False),
+        ("SELECT number, $$--$$ AS tag FROM numbers(9) LIMIT 1", False),
+        ("SELECT number FROM numbers(9) LIMIT 1", False),
+        ("INSERT INTO t VALUES (13)", False),
+    ],
+)
+def test_query_limit_follows_lexical_limit_detection(query, appends_limit):
+    context = QueryContext(query)
+    prepared = Client._prep_query(SimpleNamespace(query_limit=2), context)
+    if appends_limit:
+        assert prepared == context.final_query + "\n LIMIT 2"
+    else:
+        assert prepared == context.final_query
 
 
 def test_active_tz_utc_defaults_to_naive():

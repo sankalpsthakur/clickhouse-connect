@@ -495,11 +495,14 @@ def test_remove_comments_separates_tokens(sql: str, expected: str):
         ("SELECT number FROM numbers(5) /* a /* b */ LIMIT 0 */", "SELECT number FROM numbers(5)  "),
         (
             "SELECT number FROM numbers(5) /* a /* LIMIT 0 */ b */ LIMIT 1",
-            "SELECT number FROM numbers(5)  LIMIT 1",
+            "SELECT number FROM numbers(5)   LIMIT 1",
         ),
         ("SELECT number AS `a--b` FROM numbers(9) LIMIT 1", "SELECT number AS `a--b` FROM numbers(9) LIMIT 1"),
         ("SELECT number AS `a/*b*/c` FROM numbers(9)", "SELECT number AS `a/*b*/c` FROM numbers(9)"),
         ("SELECT number AS `a//b` FROM numbers(9)", "SELECT number AS `a//b` FROM numbers(9)"),
+        ("SELECT number AS `a# b` FROM numbers(9) LIMIT 1", "SELECT number AS `a# b` FROM numbers(9) LIMIT 1"),
+        ("SELECT '// LIMIT 0'", "SELECT '// LIMIT 0'"),
+        ("SELECT '# LIMIT 0'", "SELECT '# LIMIT 0'"),
         ("SELECT number, $$--$$ AS tag FROM numbers(9) LIMIT 1", "SELECT number, $$--$$ AS tag FROM numbers(9) LIMIT 1"),
         (
             "SELECT number, $doc$/* LIMIT 0 */$doc$ AS tag FROM numbers(9) LIMIT 1",
