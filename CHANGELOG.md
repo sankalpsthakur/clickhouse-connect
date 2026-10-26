@@ -7,6 +7,7 @@ This changelog covers the `clickhouse-connect` driver. The independently version
 
 ### Bug Fixes
 
+- Query classification now follows the ClickHouse lexer when stripping comments. `//`, `# `, and `#!` line comments, nested `/* */` block comments, backtick identifiers, `$tag$` heredocs, and backslash or doubled-quote escapes no longer hide a real `LIMIT` or leave a commented `LIMIT 0` behind. That was causing client-side `query_limit` to be skipped or duplicated, and false `LIMIT 0` metadata probes. Quoted keywords stay opaque, so a literal `' LIMIT 1'` no longer suppresses `query_limit`. Closes [#925](https://github.com/ClickHouse/clickhouse-connect/issues/925).
 - The Python codec now decodes `Nullable(Tuple(...))` correctly, preserving NULL tuples and non-NULL values, including nested tuples and tuple read formats. Closes [#1102](https://github.com/ClickHouse/clickhouse-connect/issues/1102).
 - The Python codec now decodes `Nullable(Point)` columns, returning `None` for NULL points. Previously the decoder read the NULL map as point data and the query failed.
 - With the Rust codec, `query_column_block_stream` now returns unnamed `Nullable(Tuple(...))` columns, including `Nullable(Tuple())`, as lists instead of tuples, matching the Python codec. Row results are unchanged.

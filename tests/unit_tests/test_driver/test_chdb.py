@@ -288,6 +288,23 @@ class TestChdbQuery:
         assert result.column_names == (expected_name,)
         assert result.column_types[0].name == expected_type
 
+    def test_query_limit_with_lexer_comments(self, client):
+        old_limit = client.query_limit
+        client.query_limit = 2
+        try:
+            assert client.query("SELECT number FROM numbers(9) // LIMIT 5").result_rows == [(0,), (1,)]
+            assert client.query("SELECT number FROM numbers(9) // LIMIT 0").result_rows == [(0,), (1,)]
+            assert client.query("SELECT number AS `a--b` FROM numbers(9) LIMIT 1").result_rows == [(0,)]
+            assert client.query("SELECT number FROM numbers(9) WHERE toString(number) != ' LIMIT 1'").result_rows == [
+                (0,),
+                (1,),
+            ]
+            result = client.query("SELECT number FROM numbers(9) LIMIT 0")
+            assert result.result_rows == []
+            assert result.column_names == ("number",)
+        finally:
+            client.query_limit = old_limit
+
     @pytest.mark.parametrize(
         "sql",
         [

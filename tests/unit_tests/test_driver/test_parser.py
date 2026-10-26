@@ -478,3 +478,49 @@ def test_remove_comments_no_space_after_dashes():
 )
 def test_remove_comments_separates_tokens(sql: str, expected: str):
     assert remove_sql_comments(sql) == expected
+
+
+@pytest.mark.parametrize(
+    "sql, expected",
+    [
+        ("SELECT 1 // LIMIT 5", "SELECT 1 "),
+        ("SELECT 1 // LIMIT 5\n", "SELECT 1 \n"),
+        ("SELECT 1 //LIMIT 5", "SELECT 1 "),
+        ("SELECT 1 # LIMIT 5", "SELECT 1 "),
+        ("SELECT 1 #! LIMIT 5", "SELECT 1 "),
+        ("SELECT 1 #!LIMIT 5", "SELECT 1 "),
+        ("SELECT 1 #LIMIT 5", "SELECT 1 #LIMIT 5"),
+        ("SELECT 1 #\tLIMIT 5", "SELECT 1 #\tLIMIT 5"),
+        ("SELECT 1 #", "SELECT 1 #"),
+        ("SELECT number FROM numbers(5) /* a /* b */ LIMIT 0 */", "SELECT number FROM numbers(5)  "),
+        (
+            "SELECT number FROM numbers(5) /* a /* LIMIT 0 */ b */ LIMIT 1",
+            "SELECT number FROM numbers(5)   LIMIT 1",
+        ),
+        ("SELECT number AS `a--b` FROM numbers(9) LIMIT 1", "SELECT number AS `a--b` FROM numbers(9) LIMIT 1"),
+        ("SELECT number AS `a/*b*/c` FROM numbers(9)", "SELECT number AS `a/*b*/c` FROM numbers(9)"),
+        ("SELECT number AS `a//b` FROM numbers(9)", "SELECT number AS `a//b` FROM numbers(9)"),
+        ("SELECT number AS `a# b` FROM numbers(9) LIMIT 1", "SELECT number AS `a# b` FROM numbers(9) LIMIT 1"),
+        ("SELECT '// LIMIT 0'", "SELECT '// LIMIT 0'"),
+        ("SELECT '# LIMIT 0'", "SELECT '# LIMIT 0'"),
+        ("SELECT number, $$--$$ AS tag FROM numbers(9) LIMIT 1", "SELECT number, $$--$$ AS tag FROM numbers(9) LIMIT 1"),
+        (
+            "SELECT number, $doc$/* LIMIT 0 */$doc$ AS tag FROM numbers(9) LIMIT 1",
+            "SELECT number, $doc$/* LIMIT 0 */$doc$ AS tag FROM numbers(9) LIMIT 1",
+        ),
+        ("SELECT 13 AS a$b$c -- x", "SELECT 13 AS a$b$c "),
+        ("SELECT 13 $notatag$ -- x", "SELECT 13 $notatag$ "),
+        ("SELECT 'a\\'b-- LIMIT 0'", "SELECT 'a\\'b-- LIMIT 0'"),
+        ('SELECT "a\\"b-- LIMIT 0"', 'SELECT "a\\"b-- LIMIT 0"'),
+        ("SELECT 'a''b--c'", "SELECT 'a''b--c'"),
+        ("SELECT `a``b--c`", "SELECT `a``b--c`"),
+        ("SELECT 'a--b", "SELECT 'a--b"),
+        ("SELECT /* unterminated", "SELECT /* unterminated"),
+        ("SELECT 1 --done", "SELECT 1 "),
+        ("// leading\nSELECT 1", "\nSELECT 1"),
+        ("# leading\nSELECT 1", "\nSELECT 1"),
+        ("#!leading\nSELECT 1", "\nSELECT 1"),
+    ],
+)
+def test_remove_comments_lexer_forms(sql: str, expected: str):
+    assert remove_sql_comments(sql) == expected
