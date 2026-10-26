@@ -622,6 +622,32 @@ def test_query_with_comment_between_tokens(param_client, call, sql: str, expecte
 
 
 @pytest.mark.parametrize(
+    "sql, expected",
+    [
+        ("SELECT number FROM numbers(9) // LIMIT 5", [(0,), (1,)]),
+        ("SELECT number FROM numbers(9) # LIMIT 5", [(0,), (1,)]),
+        ("SELECT number FROM numbers(9) #! LIMIT 5", [(0,), (1,)]),
+        ("SELECT number FROM numbers(9) // LIMIT 0", [(0,), (1,)]),
+        ("SELECT number FROM numbers(9) /* a /* b */ LIMIT 0 */", [(0,), (1,)]),
+        ("SELECT number AS `a--b` FROM numbers(9) LIMIT 1", [(0,)]),
+        ("SELECT number, $$--$$ AS tag FROM numbers(9) LIMIT 1", [(0, "--")]),
+        ("SELECT number FROM numbers(9) WHERE toString(number) != 'a\\'b-- LIMIT 0' LIMIT 1", [(0,)]),
+        ("SELECT number FROM numbers(9) WHERE toString(number) != ' LIMIT 1'", [(0,), (1,)]),
+        ("SELECT number FROM numbers(9) LIMIT 1", [(0,)]),
+        ("SELECT number AS `LIMIT 0--` FROM numbers(9)", [(0,), (1,)]),
+    ],
+)
+def test_query_limit_with_lexer_comments(param_client, call, sql: str, expected: list):
+    old_limit = param_client.query_limit
+    param_client.query_limit = 2
+    try:
+        result = call(param_client.query, sql)
+    finally:
+        param_client.query_limit = old_limit
+    assert result.result_set == expected
+
+
+@pytest.mark.parametrize(
     "sql",
     [
         "SELECT name, database FROM system.tables LIMIT/*c*/0",

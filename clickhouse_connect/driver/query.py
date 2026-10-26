@@ -8,9 +8,16 @@ from zoneinfo import ZoneInfoNotFoundError
 
 from clickhouse_connect.driver import tzutil
 from clickhouse_connect.driver.binding import (
+    _SQL_TOKEN_INVALID,
+    _SQL_TOKEN_SEMICOLON,
+    _SQL_TOKEN_TRIVIA,
+    _SQL_TOKEN_WORD,
+    _SQL_WHITESPACE,
     _binding_has_binary_values,
     _binding_keeps_query_structure,
+    _heredoc_start_re,
     _needs_trailing_semicolon_lexer,
+    _next_sql_token,
     _query_is_insert,
     _strip_trailing_semicolons,
     bind_query,
@@ -36,13 +43,11 @@ _VALID_TZ_SOURCES = {"auto", "server", "local"}
 
 
 commands = "CREATE|ALTER|SYSTEM|GRANT|REVOKE|CHECK|DETACH|ATTACH|DROP|DELETE|KILL|OPTIMIZE|SET|RENAME|TRUNCATE|USE|UPDATE"
+_COMMAND_WORDS = frozenset(commands.split("|"))
 
-limit_re = re.compile(r"\s+LIMIT($|\s)", re.IGNORECASE)
-select_re = re.compile(r"(^|\s)SELECT\s", re.IGNORECASE)
 leading_select_re = re.compile(r"^\s*SELECT(?:\s|$)", re.IGNORECASE)
 insert_re = re.compile(r"(^|\s)INSERT\s*INTO", re.IGNORECASE)
-command_re = re.compile(r"(^\s*)(" + commands + r")\s", re.IGNORECASE)
-bare_row_policy_show_re = re.compile(r"^\s*SHOW\s+(ROW\s+)?POLICIES\s*(?:;\s*)*$", re.IGNORECASE)
+_SQL_COMMENT_MARKERS = ("--", "/*", "//", "# ", "#!")
 
 
 class QueryContext(BaseQueryContext):
@@ -170,11 +175,11 @@ class QueryContext(BaseQueryContext):
 
     @property
     def is_select(self) -> bool:
-        return select_re.search(self.uncommented_query) is not None
+        return self._is_select
 
     @property
     def has_limit(self) -> bool:
-        return limit_re.search(self.uncommented_query) is not None
+        return self._has_limit
 
     @property
     def is_insert(self) -> bool:
@@ -182,7 +187,7 @@ class QueryContext(BaseQueryContext):
 
     @property
     def is_command(self) -> bool:
-        return command_re.search(self.uncommented_query) is not None or bare_row_policy_show_re.search(self.uncommented_query) is not None
+        return self._is_command
 
     def set_parameters(self, parameters: Sequence | dict[str, Any]):
         self.parameters = parameters
@@ -280,6 +285,10 @@ class QueryContext(BaseQueryContext):
         copy.internal = self.internal
         return copy
 
+    def _set_uncommented_query(self, sql: str) -> None:
+        self.uncommented_query = sql
+        self._is_select, self._has_limit, self._is_command = _classify_sql(sql)
+
     def _update_query(self):
         query = self.query
         if isinstance(query, str) and not _binding_keeps_query_structure(query, self.parameters):
@@ -294,11 +303,11 @@ class QueryContext(BaseQueryContext):
             self.final_query, self.bind_params = bind_query(query_to_bind, self.parameters, self.server_tz)
             if isinstance(self.final_query, bytes):
                 # Mixed binary and client-side binds cannot be safely classified after binding.
-                self.uncommented_query = uncommented_template or remove_sql_comments(query)
+                self._set_uncommented_query(uncommented_template or remove_sql_comments(query))
                 self._is_insert = _query_is_insert(query)
                 return
 
-            self.uncommented_query = remove_sql_comments(self.final_query)
+            self._set_uncommented_query(remove_sql_comments(self.final_query))
             self._is_insert = _query_is_insert(self.final_query)
             if ";" in self.final_query and not self.is_insert:
                 if _needs_trailing_semicolon_lexer(self.final_query):
@@ -308,7 +317,7 @@ class QueryContext(BaseQueryContext):
             return
 
         uncommented_template = remove_sql_comments(query)
-        self.uncommented_query = uncommented_template
+        self._set_uncommented_query(uncommented_template)
         is_insert_template = _query_is_insert(query)
         self._is_insert = is_insert_template
         if not is_insert_template and _needs_trailing_semicolon_lexer(query):
@@ -460,7 +469,74 @@ class QueryResult(Closable):
                 block_gen.close()
 
 
-comment_re = re.compile(r"(\".*?\"|\'.*?\')|(/\*.*?\*/|(--)[^\n]*$)", re.MULTILINE | re.DOTALL)
+def _sql_heredoc_ends(query: str) -> dict[str, int]:
+    if "$" not in query:
+        return {}
+    return {match.group(1): match.start() for match in _heredoc_start_re.finditer(query)}
+
+
+def _classify_sql(sql: str) -> tuple[bool, bool, bool]:
+    """Return (is_select, has_limit, is_command) from ClickHouse lexical tokens.
+
+    Quoted strings, backticks, heredocs, and comments are opaque. is_command is the
+    first statement keyword, including a bare SHOW [ROW] POLICIES statement.
+    """
+    heredoc_ends = _sql_heredoc_ends(sql)
+    is_select = False
+    has_limit = False
+    command_state = "start"
+    index = 0
+    end = len(sql)
+    while index < end:
+        token, token_end = _next_sql_token(sql, index, heredoc_ends)
+        if token == _SQL_TOKEN_INVALID:
+            if command_state in ("start", "show", "show_row"):
+                command_state = "not_command"
+            break
+        if token == _SQL_TOKEN_TRIVIA:
+            index = token_end
+            continue
+
+        if token == _SQL_TOKEN_WORD:
+            word = sql[index:token_end].upper()
+            if word == "SELECT":
+                is_select = True
+            elif word == "LIMIT":
+                has_limit = True
+
+            if command_state == "start":
+                if word in _COMMAND_WORDS:
+                    command_state = "command"
+                elif word == "SHOW":
+                    command_state = "show"
+                else:
+                    command_state = "not_command"
+            elif command_state == "show":
+                if word == "ROW":
+                    command_state = "show_row"
+                elif word == "POLICIES":
+                    command_state = "show_policies"
+                else:
+                    command_state = "not_command"
+            elif command_state == "show_row":
+                command_state = "show_policies" if word == "POLICIES" else "not_command"
+            elif command_state in ("show_policies", "show_semi"):
+                command_state = "not_command"
+        elif token == _SQL_TOKEN_SEMICOLON:
+            if command_state == "show_policies":
+                command_state = "show_semi"
+            elif command_state == "show_semi":
+                pass
+            elif command_state in ("start", "show", "show_row"):
+                command_state = "not_command"
+        elif command_state in ("start", "show", "show_row", "show_policies", "show_semi"):
+            command_state = "not_command"
+
+        if is_select and has_limit and command_state not in ("start", "show", "show_row"):
+            break
+        index = token_end
+
+    return is_select, has_limit, command_state in ("command", "show_policies", "show_semi")
 
 
 def remove_sql_comments(sql: str) -> str:
@@ -472,20 +548,36 @@ def remove_sql_comments(sql: str) -> str:
     A block comment is replaced with a single space because the server lexer treats it as a token separator,
     so "SELECT/*c*/1" is two tokens for the server and has to stay two tokens here.  A line comment ends at
     its newline, which is kept, so it separates the tokens around it on its own.
+
+    The scan follows the server lexer: --, //, # , and #! line comments, nested block comments, quoted
+    strings and identifiers with backslash and doubled-quote escapes, and $tag$ heredocs.
     :param sql:  SQL query
     :return: SQL Query without SQL comments
     """
+    if not any(marker in sql for marker in _SQL_COMMENT_MARKERS):
+        return sql
 
-    def replacer(match):
-        # if the 2nd group (capturing comments) is not None, it means we have captured a
-        # non-quoted, actual comment string, so replace it with its separator
-        if match.group(2):
-            # the 3rd group is only set for a line comment, whose terminating newline is not consumed
-            return "" if match.group(3) else " "
-        # Otherwise we've actually captured a quoted string, so return it
-        return match.group(1)
-
-    return comment_re.sub(replacer, sql)
+    heredoc_ends = _sql_heredoc_ends(sql)
+    parts: list[str] = []
+    changed = False
+    index = 0
+    end = len(sql)
+    while index < end:
+        token, token_end = _next_sql_token(sql, index, heredoc_ends)
+        if token == _SQL_TOKEN_INVALID:
+            parts.append(sql[index:])
+            break
+        if token == _SQL_TOKEN_TRIVIA and sql[index] not in _SQL_WHITESPACE:
+            changed = True
+            if sql.startswith("/*", index):
+                parts.append(" ")
+            elif token_end > index and sql[token_end - 1] == "\n":
+                parts.append("\n")
+            index = token_end
+            continue
+        parts.append(sql[index:token_end])
+        index = token_end
+    return "".join(parts) if changed else sql
 
 
 def to_arrow(content: bytes):
